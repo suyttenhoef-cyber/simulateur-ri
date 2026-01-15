@@ -1,40 +1,20 @@
 import { useMemo, useState } from "react";
 import { computeRI } from "./engine/ri";
-import { useEffect } from "react";
-
-useEffect(() => {
-  function notifyHeight() {
-    const height = document.documentElement.scrollHeight;
-    window.parent?.postMessage(
-      { type: "SIMULATEUR_RI_HEIGHT", height },
-      "*"
-    );
-  }
-
-  notifyHeight();
-
-  const observer = new ResizeObserver(() => {
-    notifyHeight();
-  });
-
-  observer.observe(document.body);
-
-  return () => observer.disconnect();
-}, []);
 
 const SECTIONS = [
   { id: "reference", label: "Référence" },
   { id: "identite", label: "Informations" },
   { id: "menage", label: "Ménage" },
   { id: "revenus_nets", label: "Revenus nets" },
+  { id: "cmr", label: "Chômage / Mutuelle / Remplacement" },
   { id: "ressources", label: "Ressources" },
   { id: "apercu", label: "Aperçu" },
 ];
 
 const defaultRow = () => ({
   label: "",
-  comptabilise: 0, // colonne "Revenus comptabilisés €/mois"
-  exonere: 0, // colonne "Revenus exonérés €/mois"
+  comptabilise: 0,
+  exonere: 0,
 });
 
 const defaultData = {
@@ -53,16 +33,28 @@ const defaultData = {
     nbEnfants: 0,
   },
   revenusNets: {
-    demandeur: {
-      rows: [defaultRow()],
+    demandeur: { rows: [defaultRow()] },
+    conjoint: { enabled: false, rows: [defaultRow()] },
+  },
+  cmr: {
+    chomage: {
+      mensuelReel: 0,
+      montantJour26: 0, // €/jour → *26
+      montantJourAnnuel: 0, // €/jour → *joursPayesAnnee/12
     },
-    conjoint: {
-      enabled: false,
-      rows: [defaultRow()],
+    mutuelle: {
+      mensuelReel: 0,
+      montantJour26: 0,
+      montantJourAnnuel: 0,
+    },
+    remplacement: {
+      pensionMensuel: 0,
+      droitPasserelleMensuel: 0,
+      allocationHandicapeMensuel: 0,
     },
   },
   ressources: {
-    autresRessourcesMensuelles: 0, // temporaire (chômage, mutuelle, avantages, etc. viendront remplacer)
+    autresRessourcesMensuelles: 0, // placeholder pour la suite (avantages en nature, etc.)
     ressourcesDiversesAnnuelles: 0, // annuel
   },
 };
@@ -91,20 +83,15 @@ function normalizeDateISO(dateISO) {
 }
 
 function situationToCategorie(situation) {
-  // Mapping à confirmer si vous avez une règle interne différente.
   if (situation === "isolé") return 1;
   if (situation === "cohabitant") return 2;
-  return 3; // famille
+  return 3;
 }
 
 function computeNetMonthly(rows) {
   const sumC = rows.reduce((acc, r) => acc + safeNumber(r.comptabilise, 0), 0);
   const sumE = rows.reduce((acc, r) => acc + safeNumber(r.exonere, 0), 0);
-  return {
-    sumComptabilise: sumC,
-    sumExonere: sumE,
-    net: sumC - sumE,
-  };
+  return { sumComptabilise: sumC, sumExonere: sumE, net: sumC - sumE };
 }
 
 function Money({ value }) {
@@ -120,11 +107,9 @@ function RowsTable({ title, rows, onChangeRows }) {
     const next = rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r));
     onChangeRows(next);
   }
-
   function addRow() {
     onChangeRows([...rows, defaultRow()]);
   }
-
   function removeRow(i) {
     const next = rows.filter((_, idx) => idx !== i);
     onChangeRows(next.length ? next : [defaultRow()]);
@@ -210,53 +195,44 @@ const thStyle = { textAlign: "left", borderBottom: "1px solid #ddd", padding: "8
 const tdStyle = { borderBottom: "1px solid #eee", padding: "8px 6px", verticalAlign: "top" };
 const tfStyle = { padding: "8px 6px" };
 
-function computeFromForm(data) {
-  const categorie = situationToCategorie(data.menage.situation);
-  const dateISO = normalizeDateISO(data.reference.dateISO);
+/**
+ * Reproduction Excel: NETWORKDAYS.INTL(...,"0000001")
+ * => tous les jours comptent sauf le dimanche.
+ */
+function daysPaidInYearExcludingSunday(year) {
+  const start = new Date(Date.UTC(year, 0, 1));
+  const end = new Date(Date.UTC(year, 11, 31));
+  let count = 0;
 
-  const jours =
-    data.reference.joursPrisEnCompte === "" || data.reference.joursPrisEnCompte == null
-      ? null
-      : safeNumber(data.reference.joursPrisEnCompte, null);
+  for (let d = start; d <= end; d = new Date(d.getTime() + 24 * 3600 * 1000)) {
+    const day = d.getUTCDay(); // 0=dimanche
+    if (day !== 0) count += 1;
+  }
+  return count;
+}
 
-  // Revenus nets (demandeur + conjoint si activé)
-  const dem = computeNetMonthly(data.revenusNets.demandeur.rows);
-  const conj = data.revenusNets.conjoint.enabled
-    ? computeNetMonthly(data.revenusNets.conjoint.rows)
-    : { sumComptabilise: 0, sumExonere: 0, net: 0 };
-
-  // Autres ressources mensuelles (temporaire)
-  const autresMensuelles = safeNumber(data.ressources.autresRessourcesMensuelles, 0);
-
-  // Total ressources mensuelles (temporaire mais déjà structuré)
-  const totalMensuel = dem.net + conj.net + autresMensuelles;
-
-  // Ressources annuelles diverses (temporaire)
-  const diversesAnnuelles = safeNumber(data.ressources.ressourcesDiversesAnnuelles, 0);
-
-  // Total annuel utilisé par le moteur RI (équivalent “C37” au stade actuel)
-  const totalRessourcesAnnuelles = totalMensuel * 12 + diversesAnnuelles;
-
-  const ri = computeRI({
-    dateISO,
-    categorie,
-    totalRessourcesAnnuelles,
-    joursPrisEnCompte: jours,
-  });
+function computeChomageOrMutuelleMonthly({ mensuelReel, montantJour26, montantJourAnnuel, year }) {
+  const m1 = safeNumber(mensuelReel, 0);
+  const m2 = safeNumber(montantJour26, 0) * 26;
+  const daysPaid = daysPaidInYearExcludingSunday(year);
+  const m3 = (safeNumber(montantJourAnnuel, 0) * daysPaid) / 12;
 
   return {
-    ...ri,
-    _breakdown: {
-      revenusNetsDemandeurMensuel: dem.net,
-      revenusNetsConjointMensuel: conj.net,
-      autresMensuelles,
-      totalMensuel,
-      diversesAnnuelles,
-      totalRessourcesAnnuelles,
-      categorie,
-      dateISO,
-    },
+    mensuelReel: m1,
+    mensuel26: m2,
+    mensuelAnnuel: m3,
+    mensuelTotal: m1 + m2 + m3,
+    annuelTotal: (m1 + m2 + m3) * 12,
+    daysPaid,
   };
+}
+
+function computeRemplacementMonthly({ pensionMensuel, droitPasserelleMensuel, allocationHandicapeMensuel }) {
+  const p = safeNumber(pensionMensuel, 0);
+  const d = safeNumber(droitPasserelleMensuel, 0);
+  const a = safeNumber(allocationHandicapeMensuel, 0);
+  const mensuel = p + d + a;
+  return { mensuel, annuel: mensuel * 12, parts: { p, d, a } };
 }
 
 function Sidebar({ active, onSelect }) {
@@ -280,17 +256,67 @@ function Sidebar({ active, onSelect }) {
           {s.label}
         </button>
       ))}
-      <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
-        Ordre conseillé : <b>Référence</b> → <b>Ménage</b> → <b>Revenus nets</b> → <b>Aperçu</b>.
-      </div>
     </nav>
   );
+}
+
+function computeFromForm(data) {
+  const categorie = situationToCategorie(data.menage.situation);
+  const dateISO = normalizeDateISO(data.reference.dateISO);
+
+  const jours =
+    data.reference.joursPrisEnCompte === "" || data.reference.joursPrisEnCompte == null
+      ? null
+      : safeNumber(data.reference.joursPrisEnCompte, null);
+
+  const [yearStr] = (dateISO || "2025-01-01").split("-");
+  const year = safeNumber(yearStr, 2025);
+
+  // Revenus nets
+  const dem = computeNetMonthly(data.revenusNets.demandeur.rows);
+  const conj = data.revenusNets.conjoint.enabled
+    ? computeNetMonthly(data.revenusNets.conjoint.rows)
+    : { sumComptabilise: 0, sumExonere: 0, net: 0 };
+
+  // Chômage / mutuelle / remplacement (mensuel équivalent)
+  const chom = computeChomageOrMutuelleMonthly({ ...data.cmr.chomage, year });
+  const mut = computeChomageOrMutuelleMonthly({ ...data.cmr.mutuelle, year });
+  const rem = computeRemplacementMonthly(data.cmr.remplacement);
+
+  const cmrMensuel = chom.mensuelTotal + mut.mensuelTotal + rem.mensuel;
+
+  // Placeholder autres mensuelles (avantages en nature, etc.)
+  const autresMensuelles = safeNumber(data.ressources.autresRessourcesMensuelles, 0);
+
+  // Total mensuel & annuel pour computeRI
+  const totalMensuel = dem.net + conj.net + cmrMensuel + autresMensuelles;
+  const diversesAnnuelles = safeNumber(data.ressources.ressourcesDiversesAnnuelles, 0);
+  const totalRessourcesAnnuelles = totalMensuel * 12 + diversesAnnuelles;
+
+  const ri = computeRI({ dateISO, categorie, totalRessourcesAnnuelles, joursPrisEnCompte: jours });
+
+  return {
+    ...ri,
+    _breakdown: {
+      dateISO,
+      categorie,
+      revenusNetsDemandeurMensuel: dem.net,
+      revenusNetsConjointMensuel: conj.net,
+      cmrMensuel,
+      chomage: chom,
+      mutuelle: mut,
+      remplacement: rem,
+      autresMensuelles,
+      totalMensuel,
+      diversesAnnuelles,
+      totalRessourcesAnnuelles,
+    },
+  };
 }
 
 export default function App() {
   const [active, setActive] = useState("reference");
   const [data, setData] = useState(defaultData);
-
   const result = useMemo(() => computeFromForm(data), [data]);
 
   function reset() {
@@ -319,7 +345,6 @@ export default function App() {
           {active === "reference" && (
             <section style={{ display: "grid", gap: 12 }}>
               <h2 style={{ marginTop: 0 }}>Référence</h2>
-
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                 <Field label="Date de référence (barème)">
                   <input
@@ -330,7 +355,6 @@ export default function App() {
                     }
                   />
                 </Field>
-
                 <Field label="Jours pris en compte (prorata)" hint="Laisse vide pour mois complet.">
                   <input
                     type="number"
@@ -348,7 +372,6 @@ export default function App() {
           {active === "identite" && (
             <section style={{ display: "grid", gap: 12 }}>
               <h2 style={{ marginTop: 0 }}>Informations</h2>
-
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                 <Field label="Nom">
                   <input
@@ -356,7 +379,6 @@ export default function App() {
                     onChange={(e) => setData((d) => ({ ...d, identite: { ...d.identite, nom: e.target.value } }))}
                   />
                 </Field>
-
                 <Field label="Prénom">
                   <input
                     value={data.identite.prenom}
@@ -365,7 +387,6 @@ export default function App() {
                     }
                   />
                 </Field>
-
                 <Field label="Date de naissance">
                   <input
                     type="date"
@@ -375,7 +396,6 @@ export default function App() {
                     }
                   />
                 </Field>
-
                 <Field label="Nationalité">
                   <input
                     value={data.identite.nationalite}
@@ -391,7 +411,6 @@ export default function App() {
           {active === "menage" && (
             <section style={{ display: "grid", gap: 12 }}>
               <h2 style={{ marginTop: 0 }}>Ménage</h2>
-
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                 <Field label="Situation (mappée vers Catégorie Excel)">
                   <select
@@ -403,7 +422,6 @@ export default function App() {
                     <option value="famille">Famille (Cat. 3)</option>
                   </select>
                 </Field>
-
                 <Field label="Nombre d’enfants à charge">
                   <input
                     type="number"
@@ -429,7 +447,10 @@ export default function App() {
                 title="Demandeur"
                 rows={data.revenusNets.demandeur.rows}
                 onChangeRows={(rows) =>
-                  setData((d) => ({ ...d, revenusNets: { ...d.revenusNets, demandeur: { ...d.revenusNets.demandeur, rows } } }))
+                  setData((d) => ({
+                    ...d,
+                    revenusNets: { ...d.revenusNets, demandeur: { ...d.revenusNets.demandeur, rows } },
+                  }))
                 }
               />
 
@@ -455,13 +476,178 @@ export default function App() {
                   title="Conjoint"
                   rows={data.revenusNets.conjoint.rows}
                   onChangeRows={(rows) =>
-                    setData((d) => ({ ...d, revenusNets: { ...d.revenusNets, conjoint: { ...d.revenusNets.conjoint, rows } } }))
+                    setData((d) => ({
+                      ...d,
+                      revenusNets: { ...d.revenusNets, conjoint: { ...d.revenusNets.conjoint, rows } },
+                    }))
                   }
                 />
               )}
+            </section>
+          )}
 
-              <div style={{ opacity: 0.75, fontSize: 13 }}>
-                Règle Excel reproduite : <b>net mensuel = Σ(comptabilisés) − Σ(exonérés)</b>, puis <b>annuel = mensuel × 12</b>.
+          {active === "cmr" && (
+            <section style={{ display: "grid", gap: 12 }}>
+              <h2 style={{ marginTop: 0 }}>Chômage / Mutuelle / Remplacement</h2>
+
+              <div style={{ display: "grid", gap: 12 }}>
+                <div style={{ border: "1px solid #ddd", borderRadius: 10, padding: 12 }}>
+                  <h3 style={{ marginTop: 0 }}>Chômage</h3>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+                    <Field label="Montant mensuel réel">
+                      <input
+                        type="number"
+                        value={data.cmr.chomage.mensuelReel}
+                        onChange={(e) =>
+                          setData((d) => ({
+                            ...d,
+                            cmr: { ...d.cmr, chomage: { ...d.cmr.chomage, mensuelReel: safeNumber(e.target.value, 0) } },
+                          }))
+                        }
+                      />
+                    </Field>
+
+                    <Field label="Montant/jour (sur 26 jours)">
+                      <input
+                        type="number"
+                        value={data.cmr.chomage.montantJour26}
+                        onChange={(e) =>
+                          setData((d) => ({
+                            ...d,
+                            cmr: { ...d.cmr, chomage: { ...d.cmr.chomage, montantJour26: safeNumber(e.target.value, 0) } },
+                          }))
+                        }
+                      />
+                    </Field>
+
+                    <Field label="Montant/jour (annuel)">
+                      <input
+                        type="number"
+                        value={data.cmr.chomage.montantJourAnnuel}
+                        onChange={(e) =>
+                          setData((d) => ({
+                            ...d,
+                            cmr: {
+                              ...d.cmr,
+                              chomage: { ...d.cmr.chomage, montantJourAnnuel: safeNumber(e.target.value, 0) },
+                            },
+                          }))
+                        }
+                      />
+                    </Field>
+                  </div>
+
+                  <div style={{ marginTop: 10, fontSize: 13, opacity: 0.75 }}>
+                    Mensuel équivalent = mensuel réel + (€/jour × 26) + (€/jour annuel × jours payés / 12).
+                  </div>
+                </div>
+
+                <div style={{ border: "1px solid #ddd", borderRadius: 10, padding: 12 }}>
+                  <h3 style={{ marginTop: 0 }}>Mutuelle</h3>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+                    <Field label="Montant mensuel réel">
+                      <input
+                        type="number"
+                        value={data.cmr.mutuelle.mensuelReel}
+                        onChange={(e) =>
+                          setData((d) => ({
+                            ...d,
+                            cmr: { ...d.cmr, mutuelle: { ...d.cmr.mutuelle, mensuelReel: safeNumber(e.target.value, 0) } },
+                          }))
+                        }
+                      />
+                    </Field>
+
+                    <Field label="Montant/jour (sur 26 jours)">
+                      <input
+                        type="number"
+                        value={data.cmr.mutuelle.montantJour26}
+                        onChange={(e) =>
+                          setData((d) => ({
+                            ...d,
+                            cmr: { ...d.cmr, mutuelle: { ...d.cmr.mutuelle, montantJour26: safeNumber(e.target.value, 0) } },
+                          }))
+                        }
+                      />
+                    </Field>
+
+                    <Field label="Montant/jour (annuel)">
+                      <input
+                        type="number"
+                        value={data.cmr.mutuelle.montantJourAnnuel}
+                        onChange={(e) =>
+                          setData((d) => ({
+                            ...d,
+                            cmr: {
+                              ...d.cmr,
+                              mutuelle: { ...d.cmr.mutuelle, montantJourAnnuel: safeNumber(e.target.value, 0) },
+                            },
+                          }))
+                        }
+                      />
+                    </Field>
+                  </div>
+
+                  <div style={{ marginTop: 10, fontSize: 13, opacity: 0.75 }}>
+                    Même logique que l’Excel (NETWORKDAYS.INTL avec dimanche exclu).
+                  </div>
+                </div>
+
+                <div style={{ border: "1px solid #ddd", borderRadius: 10, padding: 12 }}>
+                  <h3 style={{ marginTop: 0 }}>Remplacement</h3>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+                    <Field label="Pension (mensuel)">
+                      <input
+                        type="number"
+                        value={data.cmr.remplacement.pensionMensuel}
+                        onChange={(e) =>
+                          setData((d) => ({
+                            ...d,
+                            cmr: { ...d.cmr, remplacement: { ...d.cmr.remplacement, pensionMensuel: safeNumber(e.target.value, 0) } },
+                          }))
+                        }
+                      />
+                    </Field>
+
+                    <Field label="Droit passerelle (mensuel)">
+                      <input
+                        type="number"
+                        value={data.cmr.remplacement.droitPasserelleMensuel}
+                        onChange={(e) =>
+                          setData((d) => ({
+                            ...d,
+                            cmr: {
+                              ...d.cmr,
+                              remplacement: {
+                                ...d.cmr.remplacement,
+                                droitPasserelleMensuel: safeNumber(e.target.value, 0),
+                              },
+                            },
+                          }))
+                        }
+                      />
+                    </Field>
+
+                    <Field label="Allocation d’Handicapé ARR (mensuel)">
+                      <input
+                        type="number"
+                        value={data.cmr.remplacement.allocationHandicapeMensuel}
+                        onChange={(e) =>
+                          setData((d) => ({
+                            ...d,
+                            cmr: {
+                              ...d.cmr,
+                              remplacement: {
+                                ...d.cmr.remplacement,
+                                allocationHandicapeMensuel: safeNumber(e.target.value, 0),
+                              },
+                            },
+                          }))
+                        }
+                      />
+                    </Field>
+                  </div>
+                </div>
               </div>
             </section>
           )}
@@ -471,8 +657,8 @@ export default function App() {
               <h2 style={{ marginTop: 0 }}>Ressources</h2>
 
               <Field
-                label="Autres ressources mensuelles (temporaire)"
-                hint="À remplacer ensuite par : chômage/mutuelle/remplacement, avantages en nature, etc."
+                label="Autres ressources mensuelles (placeholder)"
+                hint="À remplacer ensuite par : avantages en nature, etc."
               >
                 <input
                   type="number"
@@ -486,10 +672,7 @@ export default function App() {
                 />
               </Field>
 
-              <Field
-                label="Ressources diverses annuelles"
-                hint="Montants annuels qui ne sont pas mensuels."
-              >
+              <Field label="Ressources diverses annuelles">
                 <input
                   type="number"
                   value={data.ressources.ressourcesDiversesAnnuelles}
@@ -501,10 +684,6 @@ export default function App() {
                   }
                 />
               </Field>
-
-              <div style={{ fontSize: 13, opacity: 0.75 }}>
-                Le total annuel utilisé pour le calcul = <b>(total mensuel × 12) + diverses annuelles</b>.
-              </div>
             </section>
           )}
 
@@ -537,11 +716,27 @@ export default function App() {
                   <ul style={{ marginTop: 8 }}>
                     <li>Revenus nets demandeur (mensuel) : <b><Money value={result._breakdown.revenusNetsDemandeurMensuel} /></b></li>
                     <li>Revenus nets conjoint (mensuel) : <b><Money value={result._breakdown.revenusNetsConjointMensuel} /></b></li>
+                    <li>Chômage/Mutuelle/Remplacement (mensuel) : <b><Money value={result._breakdown.cmrMensuel} /></b></li>
                     <li>Autres ressources mensuelles : <b><Money value={result._breakdown.autresMensuelles} /></b></li>
-                    <li>Total mensuel : <b><Money value={result._breakdown.totalMensuel} /></b></li>
+                    <li><b>Total mensuel</b> : <b><Money value={result._breakdown.totalMensuel} /></b></li>
                     <li>Diverses annuelles : <b><Money value={result._breakdown.diversesAnnuelles} /></b></li>
-                    <li>Total ressources annuelles (utilisé) : <b><Money value={result._breakdown.totalRessourcesAnnuelles} /></b></li>
+                    <li><b>Total ressources annuelles (utilisé)</b> : <b><Money value={result._breakdown.totalRessourcesAnnuelles} /></b></li>
                   </ul>
+
+                  <details style={{ marginTop: 12 }}>
+                    <summary>Détails CMR (debug)</summary>
+                    <pre style={{ whiteSpace: "pre-wrap" }}>
+                      {JSON.stringify(
+                        {
+                          chomage: result._breakdown.chomage,
+                          mutuelle: result._breakdown.mutuelle,
+                          remplacement: result._breakdown.remplacement,
+                        },
+                        null,
+                        2
+                      )}
+                    </pre>
+                  </details>
 
                   <ul style={{ marginTop: 12 }}>
                     {(result.explications || []).map((x, i) => (
@@ -550,23 +745,18 @@ export default function App() {
                   </ul>
 
                   <details style={{ marginTop: 12 }}>
-                    <summary>Détails (debug)</summary>
+                    <summary>Détails moteur RI (debug)</summary>
                     <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(result.details, null, 2)}</pre>
                   </details>
                 </div>
               )}
-
-              <details>
-                <summary>Données (debug)</summary>
-                <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(data, null, 2)}</pre>
-              </details>
             </section>
           )}
         </main>
       </div>
 
       <footer style={{ marginTop: 16, fontSize: 12, opacity: 0.65 }}>
-        Note : aucun stockage persistant. Cette app est “iframe-friendly”.
+        Note : on a reproduit le calcul Excel (NETWORKDAYS.INTL "0000001" = dimanche exclu).
       </footer>
     </div>
   );
