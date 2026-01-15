@@ -7,14 +7,14 @@ const SECTIONS = [
   { id: "menage", label: "Ménage" },
   { id: "revenus_nets", label: "Revenus nets" },
   { id: "cmr", label: "Chômage / Mutuelle / Remplacement" },
+  { id: "avantages", label: "Avantages en nature" },
   { id: "ressources", label: "Ressources" },
   { id: "apercu", label: "Aperçu" },
 ];
 
 const defaultRow = () => ({
   label: "",
-  comptabilise: 0,
-  exonere: 0,
+  montant: 0,
 });
 
 const defaultData = {
@@ -39,8 +39,8 @@ const defaultData = {
   cmr: {
     chomage: {
       mensuelReel: 0,
-      montantJour26: 0, // €/jour → *26
-      montantJourAnnuel: 0, // €/jour → *joursPayesAnnee/12
+      montantJour26: 0,
+      montantJourAnnuel: 0,
     },
     mutuelle: {
       mensuelReel: 0,
@@ -53,8 +53,14 @@ const defaultData = {
       allocationHandicapeMensuel: 0,
     },
   },
+  avantages: {
+    voitureSociete: 0, // Montant mensuel de l'avantage
+    logementGratuit: 0,
+    ticketsRepas: 0,
+    autresAvantages: 0,
+  },
   ressources: {
-    autresRessourcesMensuelles: 0, // placeholder pour la suite (avantages en nature, etc.)
+    autresRessourcesMensuelles: 0, // temporaire (chômage, mutuelle, avantages, etc. viendront remplacer)
     ressourcesDiversesAnnuelles: 0, // annuel
   },
 };
@@ -195,101 +201,39 @@ const thStyle = { textAlign: "left", borderBottom: "1px solid #ddd", padding: "8
 const tdStyle = { borderBottom: "1px solid #eee", padding: "8px 6px", verticalAlign: "top" };
 const tfStyle = { padding: "8px 6px" };
 
-/**
- * Reproduction Excel: NETWORKDAYS.INTL(...,"0000001")
- * => tous les jours comptent sauf le dimanche.
- */
-function daysPaidInYearExcludingSunday(year) {
-  const start = new Date(Date.UTC(year, 0, 1));
-  const end = new Date(Date.UTC(year, 11, 31));
-  let count = 0;
-
-  for (let d = start; d <= end; d = new Date(d.getTime() + 24 * 3600 * 1000)) {
-    const day = d.getUTCDay(); // 0=dimanche
-    if (day !== 0) count += 1;
-  }
-  return count;
-}
-
-function computeChomageOrMutuelleMonthly({ mensuelReel, montantJour26, montantJourAnnuel, year }) {
-  const m1 = safeNumber(mensuelReel, 0);
-  const m2 = safeNumber(montantJour26, 0) * 26;
-  const daysPaid = daysPaidInYearExcludingSunday(year);
-  const m3 = (safeNumber(montantJourAnnuel, 0) * daysPaid) / 12;
-
-  return {
-    mensuelReel: m1,
-    mensuel26: m2,
-    mensuelAnnuel: m3,
-    mensuelTotal: m1 + m2 + m3,
-    annuelTotal: (m1 + m2 + m3) * 12,
-    daysPaid,
-  };
-}
-
-function computeRemplacementMonthly({ pensionMensuel, droitPasserelleMensuel, allocationHandicapeMensuel }) {
-  const p = safeNumber(pensionMensuel, 0);
-  const d = safeNumber(droitPasserelleMensuel, 0);
-  const a = safeNumber(allocationHandicapeMensuel, 0);
-  const mensuel = p + d + a;
-  return { mensuel, annuel: mensuel * 12, parts: { p, d, a } };
-}
-
-function Sidebar({ active, onSelect }) {
-  return (
-    <nav style={{ border: "1px solid #ddd", borderRadius: 10, padding: 10 }}>
-      {SECTIONS.map((s) => (
-        <button
-          key={s.id}
-          onClick={() => onSelect(s.id)}
-          style={{
-            width: "100%",
-            textAlign: "left",
-            padding: "10px 10px",
-            marginBottom: 8,
-            borderRadius: 10,
-            border: "1px solid #ddd",
-            background: active === s.id ? "#f3f3f3" : "white",
-            cursor: "pointer",
-          }}
-        >
-          {s.label}
-        </button>
-      ))}
-    </nav>
-  );
+function computeAvantagesMensuels({ voitureSociete, logementGratuit, ticketsRepas, autresAvantages }) {
+  const v = safeNumber(voitureSociete, 0);
+  const l = safeNumber(logementGratuit, 0);
+  const t = safeNumber(ticketsRepas, 0);
+  const o = safeNumber(autresAvantages, 0);
+  const mensuelTotal = v + l + t + o;
+  return { mensuelTotal, annuelTotal: mensuelTotal * 12 };
 }
 
 function computeFromForm(data) {
   const categorie = situationToCategorie(data.menage.situation);
   const dateISO = normalizeDateISO(data.reference.dateISO);
-
-  const jours =
-    data.reference.joursPrisEnCompte === "" || data.reference.joursPrisEnCompte == null
+  const jours = data.reference.joursPrisEnCompte === "" || data.reference.joursPrisEnCompte == null
       ? null
       : safeNumber(data.reference.joursPrisEnCompte, null);
 
-  const [yearStr] = (dateISO || "2025-01-01").split("-");
-  const year = safeNumber(yearStr, 2025);
-
-  // Revenus nets
+  // Revenus nets (demandeur + conjoint)
   const dem = computeNetMonthly(data.revenusNets.demandeur.rows);
   const conj = data.revenusNets.conjoint.enabled
     ? computeNetMonthly(data.revenusNets.conjoint.rows)
     : { sumComptabilise: 0, sumExonere: 0, net: 0 };
 
-  // Chômage / mutuelle / remplacement (mensuel équivalent)
-  const chom = computeChomageOrMutuelleMonthly({ ...data.cmr.chomage, year });
-  const mut = computeChomageOrMutuelleMonthly({ ...data.cmr.mutuelle, year });
+  // Chômage / mutuelle / remplacement
+  const chom = computeChomageOrMutuelleMonthly({ ...data.cmr.chomage, year: new Date(dateISO).getFullYear() });
+  const mut = computeChomageOrMutuelleMonthly({ ...data.cmr.mutuelle, year: new Date(dateISO).getFullYear() });
   const rem = computeRemplacementMonthly(data.cmr.remplacement);
-
   const cmrMensuel = chom.mensuelTotal + mut.mensuelTotal + rem.mensuel;
 
-  // Placeholder autres mensuelles (avantages en nature, etc.)
-  const autresMensuelles = safeNumber(data.ressources.autresRessourcesMensuelles, 0);
+  // Avantages en nature
+  const avantages = computeAvantagesMensuels(data.avantages);
 
   // Total mensuel & annuel pour computeRI
-  const totalMensuel = dem.net + conj.net + cmrMensuel + autresMensuelles;
+  const totalMensuel = dem.net + conj.net + cmrMensuel + avantages.mensuelTotal;
   const diversesAnnuelles = safeNumber(data.ressources.ressourcesDiversesAnnuelles, 0);
   const totalRessourcesAnnuelles = totalMensuel * 12 + diversesAnnuelles;
 
@@ -302,11 +246,10 @@ function computeFromForm(data) {
       categorie,
       revenusNetsDemandeurMensuel: dem.net,
       revenusNetsConjointMensuel: conj.net,
-      cmrMensuel,
       chomage: chom,
       mutuelle: mut,
       remplacement: rem,
-      autresMensuelles,
+      avantages,
       totalMensuel,
       diversesAnnuelles,
       totalRessourcesAnnuelles,
@@ -442,7 +385,6 @@ export default function App() {
           {active === "revenus_nets" && (
             <section style={{ display: "grid", gap: 12 }}>
               <h2 style={{ marginTop: 0 }}>Revenus nets</h2>
-
               <RowsTable
                 title="Demandeur"
                 rows={data.revenusNets.demandeur.rows}
@@ -453,7 +395,6 @@ export default function App() {
                   }))
                 }
               />
-
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <input
                   type="checkbox"
@@ -489,7 +430,6 @@ export default function App() {
           {active === "cmr" && (
             <section style={{ display: "grid", gap: 12 }}>
               <h2 style={{ marginTop: 0 }}>Chômage / Mutuelle / Remplacement</h2>
-
               <div style={{ display: "grid", gap: 12 }}>
                 <div style={{ border: "1px solid #ddd", borderRadius: 10, padding: 12 }}>
                   <h3 style={{ marginTop: 0 }}>Chômage</h3>
@@ -535,10 +475,6 @@ export default function App() {
                         }
                       />
                     </Field>
-                  </div>
-
-                  <div style={{ marginTop: 10, fontSize: 13, opacity: 0.75 }}>
-                    Mensuel équivalent = mensuel réel + (€/jour × 26) + (€/jour annuel × jours payés / 12).
                   </div>
                 </div>
 
@@ -586,10 +522,6 @@ export default function App() {
                         }
                       />
                     </Field>
-                  </div>
-
-                  <div style={{ marginTop: 10, fontSize: 13, opacity: 0.75 }}>
-                    Même logique que l’Excel (NETWORKDAYS.INTL avec dimanche exclu).
                   </div>
                 </div>
 
@@ -655,7 +587,6 @@ export default function App() {
           {active === "ressources" && (
             <section style={{ display: "grid", gap: 12 }}>
               <h2 style={{ marginTop: 0 }}>Ressources</h2>
-
               <Field
                 label="Autres ressources mensuelles (placeholder)"
                 hint="À remplacer ensuite par : avantages en nature, etc."
@@ -681,16 +612,14 @@ export default function App() {
                       ...d,
                       ressources: { ...d.ressources, ressourcesDiversesAnnuelles: safeNumber(e.target.value, 0) },
                     }))
-                  }
-                />
-              </Field>
+                  />
+                </Field>
             </section>
           )}
 
           {active === "apercu" && (
             <section style={{ display: "grid", gap: 12 }}>
               <h2 style={{ marginTop: 0 }}>Aperçu</h2>
-
               {result?.error ? (
                 <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 10 }}>
                   <b>Erreur :</b> {result.error}
@@ -717,7 +646,7 @@ export default function App() {
                     <li>Revenus nets demandeur (mensuel) : <b><Money value={result._breakdown.revenusNetsDemandeurMensuel} /></b></li>
                     <li>Revenus nets conjoint (mensuel) : <b><Money value={result._breakdown.revenusNetsConjointMensuel} /></b></li>
                     <li>Chômage/Mutuelle/Remplacement (mensuel) : <b><Money value={result._breakdown.cmrMensuel} /></b></li>
-                    <li>Autres ressources mensuelles : <b><Money value={result._breakdown.autresMensuelles} /></b></li>
+                    <li>Avantages en nature mensuels : <b><Money value={result._breakdown.avantages.mensuelTotal} /></b></li>
                     <li><b>Total mensuel</b> : <b><Money value={result._breakdown.totalMensuel} /></b></li>
                     <li>Diverses annuelles : <b><Money value={result._breakdown.diversesAnnuelles} /></b></li>
                     <li><b>Total ressources annuelles (utilisé)</b> : <b><Money value={result._breakdown.totalRessourcesAnnuelles} /></b></li>
@@ -756,7 +685,7 @@ export default function App() {
       </div>
 
       <footer style={{ marginTop: 16, fontSize: 12, opacity: 0.65 }}>
-        Note : on a reproduit le calcul Excel (NETWORKDAYS.INTL "0000001" = dimanche exclu).
+        Note : on a reproduit le calcul Excel (NETWORKDAYS.INTL avec dimanche exclu).
       </footer>
     </div>
   );
