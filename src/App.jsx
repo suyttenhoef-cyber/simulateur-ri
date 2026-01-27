@@ -1441,7 +1441,7 @@ function Sidebar({ active, onSelect }) {
             color: colors.white,
             fontFamily: "'Source Sans Pro', sans-serif"
           }}>
-            Navigation
+            Menu
           </h2>
         )}
         <button
