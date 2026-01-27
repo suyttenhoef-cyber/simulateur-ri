@@ -2246,7 +2246,7 @@ export default function App() {
                       <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                         <span>Date de référence (barème)</span>
                         <a 
-                          href="https://www.cpasconnect.be/" 
+                          href="https://myportal.vandenbroeleconnect.be/perma/149746886634684678" 
                           target="_blank" 
                           rel="noopener noreferrer" 
                           title="Documentation CPAS Connect"
